@@ -4,27 +4,33 @@ import { equals, map, zipWith } from 'ramda';
 import { isAppExp, isBoolExp, isDefineExp, isIfExp, isLetrecExp, isLetExp, isNumExp,
          isPrimOp, isProcExp, isProgram, isStrExp, isVarRef, parseL5Exp, unparse,
          AppExp, BoolExp, DefineExp, Exp, IfExp, LetrecExp, LetExp, NumExp,
-         Parsed, PrimOp, ProcExp, Program, StrExp, parseL5 } from "./L5-ast";
+         Parsed, PrimOp, ProcExp, Program, StrExp, parseL5, 
+         isLitExp,
+         LitExp} from "./L5-ast";
 import { applyTEnv, makeEmptyTEnv, makeExtendTEnv, TEnv } from "./TEnv";
 import { isProcTExp, makeBoolTExp, makeNumTExp, makeProcTExp, makeStrTExp, makeVoidTExp,
          parseTE, unparseTExp,
-         BoolTExp, NumTExp, StrTExp, TExp, VoidTExp } from "./TExp";
+         BoolTExp, NumTExp, StrTExp, TExp, VoidTExp, 
+         makeFreshTExp,
+         makeEmptyTupleTExp,
+         makePairTExp,
+         Subst,
+         unify,
+         makeLiteralTExp } from "./TExp";
 import { isEmpty, allT, first, rest, NonEmptyList, List, isNonEmptyList } from '../shared/list';
 import { Result, makeFailure, bind, makeOk, zipWithResult } from '../shared/result';
 import { parse as p } from "../shared/parser";
 import { format } from '../shared/format';
 import { log } from 'console';
+import { isCompoundSExp, isEmptySExp, isSymbolSExp, SExpValue } from './L5-value';
 
 // Purpose: Check that type expressions are equivalent
 // as part of a fully-annotated type check process of exp.
 // Return an error if the types are different - true otherwise.
 // Exp is only passed for documentation purposes.
 const checkEqualType = (te1: TExp, te2: TExp, exp: Exp): Result<true> =>
-  equals(te1, te2) ? makeOk(true) :
-  bind(unparseTExp(te1), (te1: string) =>
-    bind(unparseTExp(te2), (te2: string) =>
-        bind(unparse(exp), (exp: string) => 
-            makeFailure<true>(`Incompatible types: ${te1} and ${te2} in ${exp}`))));
+  bind(unify(te1, te2), (_subst) =>
+    makeOk(true));
 
 // Compute the type of L5 AST exps to TE
 // ===============================================
@@ -53,6 +59,7 @@ export const typeofExp = (exp: Parsed, tenv: TEnv): Result<TExp> =>
     isLetrecExp(exp) ? typeofLetrec(exp, tenv) :
     isDefineExp(exp) ? typeofDefine(exp, tenv) :
     isProgram(exp) ? typeofProgram(exp, tenv) :
+    isLitExp(exp) ? typeofLit(exp) :
     // TODO: isSetExp(exp) isLitExp(exp)
     makeFailure(`Unknown type: ${format(exp)}`);
 
@@ -65,7 +72,32 @@ export const typeofExps = (exps: List<Exp>, tenv: TEnv): Result<TExp> =>
         bind(typeofExp(first(exps), tenv), _ => typeofExps(rest(exps), tenv)) :
     makeFailure(`Unexpected empty list of expressions`);
 
+const typeofSExpValue  = (val: SExpValue): Result<TExp> =>{
+    if (typeof val === 'number') {
+        return makeOk(makeNumTExp());
+    } else if (typeof val === 'boolean') {
+        return makeOk(makeBoolTExp());
+    } else if (typeof val === 'string') {
+        return makeOk(makeStrTExp());
+    } else if (isSymbolSExp(val)) {
+        return makeOk(makeLiteralTExp ())
+    } else if (isEmptySExp(val)) {
+        return makeOk(makeEmptyTupleTExp());
+    } else if (isCompoundSExp(val)) {
+        return bind(typeofSExpValue(val.val1),(carType: TExp) =>
+            bind(typeofSExpValue(val.val2), (cdrType: TExp) => 
+                makeOk(makePairTExp(carType, cdrType))));
+    }
+    return makeFailure(`Unknown SExp value type: ${format(val)}`);
+}
 
+export const typeofLit = (exp: LitExp): Result<TExp> =>{
+    if (typeof exp.val === 'number' || typeof exp.val === 'boolean' || isSymbolSExp(exp.val)) {
+        return makeOk(makeLiteralTExp());
+    } else {
+        return typeofSExpValue(exp.val);
+    }
+}
 // a number literal has type num-te
 export const typeofNum = (n: NumExp): NumTExp => makeNumTExp();
 
@@ -103,6 +135,10 @@ export const typeofPrim = (p: PrimOp): Result<TExp> =>
     (p.op === 'string=?') ? parseTE('(T1 * T2 -> boolean)') :
     (p.op === 'display') ? parseTE('(T -> void)') :
     (p.op === 'newline') ? parseTE('(Empty -> void)') :
+    (p.op === 'cons') ? parseTE('(T1 * T2 -> (Pair T1 T2))') :
+    (p.op === 'car') ? parseTE('((Pair T1 T2) -> T1)') :
+    (p.op === 'cdr') ? parseTE('((Pair T1 T2) -> T2)') :
+    
     makeFailure(`Primitive not yet implemented: ${p.op}`);
 
 // Purpose: compute the type of an if-exp
@@ -146,18 +182,20 @@ export const typeofProc = (proc: ProcExp, tenv: TEnv): Result<TExp> => {
 // We also check the correct number of arguments is passed.
 export const typeofApp = (app: AppExp, tenv: TEnv): Result<TExp> =>
     bind(typeofExp(app.rator, tenv), (ratorTE: TExp) => {
-        if (! isProcTExp(ratorTE)) {
+        const freshRatorTE = makeFreshTExp(ratorTE);
+
+        if (! isProcTExp(freshRatorTE)) {
             return bind(unparseTExp(ratorTE), (rator: string) =>
                         bind(unparse(app), (exp: string) =>
                             makeFailure<TExp>(`Application of non-procedure: ${rator} in ${exp}`)));
         }
-        if (app.rands.length !== ratorTE.paramTEs.length) {
+        if (app.rands.length !== freshRatorTE.paramTEs.length) {
             return bind(unparse(app), (exp: string) => makeFailure<TExp>(`Wrong parameter numbers passed to proc: ${exp}`));
         }
-        const constraints = zipWithResult((rand, trand) => bind(typeofExp(rand, tenv), (typeOfRand: TExp) => 
-                                                                checkEqualType(typeOfRand, trand, app)),
-                                          app.rands, ratorTE.paramTEs);
-        return bind(constraints, _ => makeOk(ratorTE.returnTE));
+        const constraints = zipWithResult((rand, trand) => bind(typeofExp(rand, tenv), (typeOfRand: TExp) =>
+                                             unify(typeOfRand, trand)),
+                                         app.rands, freshRatorTE.paramTEs);
+        return bind(constraints, _ => makeOk(freshRatorTE.returnTE));
     });
 
 // Purpose: compute the type of a let-exp

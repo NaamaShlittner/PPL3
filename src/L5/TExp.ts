@@ -29,29 +29,39 @@
 ;; [Empty -> number]
 ;; [Empty -> void]
 */
-import { chain, concat, map, uniq } from "ramda";
+import { chain, concat, equals, map, uniq } from "ramda";
 import { Sexp } from "s-expression";
 import { isEmpty, isNonEmptyList } from "../shared/list";
 import { isArray, isBoolean, isString } from '../shared/type-predicates';
 import { makeBox, setBox, unbox, Box } from '../shared/box';
 import { cons, first, rest } from '../shared/list';
-import { Result, bind, makeOk, makeFailure, mapResult, mapv } from "../shared/result";
+import { Result, bind, makeOk, makeFailure, mapResult, mapv, zipWithResult} from "../shared/result";
 import { parse as p } from "../shared/parser";
 import { format } from "../shared/format";
 
 export type TExp =  AtomicTExp | CompoundTExp | TVar;
 export const isTExp = (x: any): x is TExp => isAtomicTExp(x) || isCompoundTExp(x) || isTVar(x);
+export type Subst = { [varName: string]: TExp };
 
-export type AtomicTExp = NumTExp | BoolTExp | StrTExp | VoidTExp;
+export type AtomicTExp = NumTExp | BoolTExp | StrTExp | VoidTExp | LiteralTExp;
 export const isAtomicTExp = (x: any): x is AtomicTExp =>
-    isNumTExp(x) || isBoolTExp(x) || isStrTExp(x) || isVoidTExp(x);
+    isNumTExp(x) || isBoolTExp(x) || isStrTExp(x) || isVoidTExp(x) || isLiteralTExp(x);
 
-export type CompoundTExp = ProcTExp | TupleTExp;
-export const isCompoundTExp = (x: any): x is CompoundTExp => isProcTExp(x) || isTupleTExp(x);
+export type LiteralTExp = { tag: "LiteralTExp" }; 
+export const makeLiteralTExp = (): LiteralTExp => ({ tag: "LiteralTExp" });
+export const isLiteralTExp = (x: any): x is LiteralTExp => x.tag === "LiteralTExp";
+
+export type CompoundTExp = ProcTExp | TupleTExp | PairTExp;
+export const isCompoundTExp = (x: any): x is CompoundTExp => isProcTExp(x) || isTupleTExp(x) || isPairTExp(x);
 
 export type NonTupleTExp = AtomicTExp | ProcTExp | TVar;
 export const isNonTupleTExp = (x: any): x is NonTupleTExp =>
     isAtomicTExp(x) || isProcTExp(x) || isTVar(x);
+
+export type PairTExp = { tag: "PairTExp"; left: TExp; right: TExp; };
+export const makePairTExp = (left: TExp, right: TExp): PairTExp =>
+    ({tag: "PairTExp", left: left, right: right});
+export const isPairTExp = (x: any): x is PairTExp => x.tag === "PairTExp";
 
 export type NumTExp = { tag: "NumTExp" };
 export const makeNumTExp = (): NumTExp => ({tag: "NumTExp"});
@@ -163,16 +173,49 @@ export const parseTExp = (texp: Sexp): Result<TExp> =>
 ;; expected exactly one -> in the list
 ;; We do not accept (a -> b -> c) - must parenthesize
 */
-const parseCompoundTExp = (texps: Sexp[]): Result<ProcTExp> => {
-    const pos = texps.indexOf('->');
-    return (pos === -1)  ? makeFailure(`Procedure type expression without -> - ${format(texps)}`) :
-           (pos === 0) ? makeFailure(`No param types in proc texp - ${format(texps)}`) :
+const parseCompoundTExp = (texps: Sexp[]): Result<CompoundTExp> => {
+    if (texps.length === 0)
+        return makeFailure(`Empty type expression - ${format(texps)}`);
+
+    const pos = texps.indexOf('->');//ProcTExp
+    if (pos !== -1) {
+        return (pos === 0) ? makeFailure(`No param types in proc texp - ${format(texps)}`) :
            (pos === texps.length - 1) ? makeFailure(`No return type in proc texp - ${format(texps)}`) :
            (texps.slice(pos + 1).indexOf('->') > -1) ? makeFailure(`Only one -> allowed in a procexp - ${format(texps)}`) :
            bind(parseTupleTExp(texps.slice(0, pos)), (args: TExp[]) =>
                mapv(parseTExp(texps[pos + 1]), (returnTE: TExp) =>
                     makeProcTExp(args, returnTE)));
+    }
+
+    const head = texps[0];//PairTExp
+    if( isString(head) && head === 'Pair') {
+        return (texps.length !== 3) ?
+            makeFailure(`Pair type expression must have exactly 2 elements - ${format(texps)}`) :
+            bind(parseTExp(texps[1]), (left: TExp) =>
+                mapv(parseTExp(texps[2]), (right: TExp) =>
+                    makePairTExp(left, right)));
+    }
+
+    // TupleTExp
+    return bind(parseTupleTExp(texps), (tes: TExp[]) =>{
+        if (isEmpty(tes)) {
+            return makeOk(makeEmptyTupleTExp());
+        }
+        const NonTupleTExps: NonTupleTExp[] = [];
+        for (const element of tes) {
+            if (!isNonTupleTExp(element)) {
+                return makeFailure(`Tuple type expression must contain only non-tuple types - ${format(texps)}`);
+            }
+            else{
+                NonTupleTExps.push(element);
+            }
+        }
+        return makeOk(makeNonEmptyTupleTExp(NonTupleTExps));
+    });
+
+    
 };
+
 
 /*
 ;; Expected structure: <te1> [* <te2> ... * <ten>]?
@@ -207,15 +250,19 @@ export const unparseTExp = (te: TExp): Result<string> => {
         isBoolTExp(x) ? makeOk('boolean') :
         isStrTExp(x) ? makeOk('string') :
         isVoidTExp(x) ? makeOk('void') :
+        isLiteralTExp(x) ? makeOk('literal') :
         isEmptyTVar(x) ? makeOk(x.var) :
         isTVar(x) ? up(tvarContents(x)) :
         isProcTExp(x) ? bind(unparseTuple(x.paramTEs), (paramTEs: string[]) =>
                             mapv(unparseTExp(x.returnTE), (returnTE: string) =>
                                 [...paramTEs, '->', returnTE])) :
+        isPairTExp(x) ? bind(unparseTExp(x.left), (left: string) =>
+                            mapv(unparseTExp(x.right), (right: string) =>
+                                `(${['Pair', left, right].join(' ')})`)) :
         isEmptyTupleTExp(x) ? makeOk("Empty") :
         isNonEmptyTupleTExp(x) ? unparseTuple(x.TEs) :
         x === undefined ? makeFailure("Undefined TVar") :
-        x;
+        makeFailure(`Unexpected type expression in unparseTExp: ${JSON.stringify(x)}`);
 
     const unparsed = up(te);
     return mapv(unparsed,
@@ -297,4 +344,102 @@ export const equivalentTEs = (te1: TExp, te2: TExp): boolean => {
     else {
         return (uniq(map((p) => p.left.var, tvarsPairs)).length === uniq(map((p) => p.right.var, tvarsPairs)).length);
     }
+};
+
+const occursIn = (v: string, t: TExp): boolean => {
+    const derefedT = tvarDeref(t);
+    if (isTVar(derefedT)) {
+        return v === derefedT.var;
+    } else if (isProcTExp(derefedT)) {
+        return occursIn(v, derefedT.returnTE) || derefedT.paramTEs.some(param => occursIn(v, param));
+    } else if (isPairTExp(derefedT)) {
+        return occursIn(v, derefedT.left) || occursIn(v, derefedT.right);
+    } else if (isNonEmptyTupleTExp(derefedT)) {
+        return derefedT.TEs.some(te => occursIn(v, te));
+    }
+    return false;
+};
+
+export const unify = (te1: TExp, te2: TExp): Result<true> => {
+    const derefedTe1 = tvarDeref(te1);
+    const derefedTe2 = tvarDeref(te2);
+
+    if (equals(derefedTe1, derefedTe2)) {
+        return makeOk(true);
+    }
+    else if (isTVar(derefedTe1)) {
+        if (occursIn(derefedTe1.var, derefedTe2)) {
+            return makeFailure(`Occurs check failed: ${derefedTe1.var} occurs in ${unparseTExp(derefedTe2)}`);
+        }
+        tvarSetContents(derefedTe1, derefedTe2);
+        return makeOk(true);
+    }
+    else if (isTVar(derefedTe2)) {
+        if (occursIn(derefedTe2.var, derefedTe1)) {
+            return makeFailure(`Occurs check failed: ${derefedTe2.var} occurs in ${unparseTExp(derefedTe1)}`);
+        }
+        tvarSetContents(derefedTe2, derefedTe1);
+        return makeOk(true);
+    }
+    else if (isAtomicTExp(derefedTe1) && isAtomicTExp(derefedTe2)) {
+        return eqAtomicTExp(derefedTe1, derefedTe2) ? makeOk(true) :
+            makeFailure(`Type mismatch: ${unparseTExp(te1)} and ${unparseTExp(te2)}`);
+    }
+    else if (isProcTExp(derefedTe1) && isProcTExp(derefedTe2)) {
+        if (derefedTe1.paramTEs.length !== derefedTe2.paramTEs.length) {
+            return makeFailure(`Procedure parameter count mismatch: ${unparseTExp(te1)} and ${unparseTExp(te2)}`);
+        }
+        const paramUnificationResults = zipWithResult(unify, derefedTe1.paramTEs, derefedTe2.paramTEs);
+        const returnUnificationResult = unify(derefedTe1.returnTE, derefedTe2.returnTE);
+
+        return bind(paramUnificationResults, _ =>
+            bind(returnUnificationResult, _ => makeOk(true)));
+    }
+    else if (isPairTExp(derefedTe1) && isPairTExp(derefedTe2)) {
+        const leftUnification = unify(derefedTe1.left, derefedTe2.left);
+        const rightUnification = unify(derefedTe1.right, derefedTe2.right);
+        return bind(leftUnification, _ => bind(rightUnification, _ => makeOk(true)));
+    }
+    else if (isTupleTExp(derefedTe1) && isTupleTExp(derefedTe2)) {
+        if (isEmptyTupleTExp(derefedTe1) && isEmptyTupleTExp(derefedTe2)) {
+            return makeOk(true);
+        }
+        if (isNonEmptyTupleTExp(derefedTe1) && isNonEmptyTupleTExp(derefedTe2)) {
+            if (derefedTe1.TEs.length !== derefedTe2.TEs.length) {
+                return makeFailure(`Tuple length mismatch: ${unparseTExp(te1)} and ${unparseTExp(te2)}`);
+            }
+            return bind(zipWithResult(unify, derefedTe1.TEs, derefedTe2.TEs), _ => makeOk(true));
+        }
+        return makeFailure(`Tuple type mismatch: ${unparseTExp(te1)} and ${unparseTExp(te2)}`);
+    }
+    else {
+        return makeFailure(`Type mismatch: cannot unify ${unparseTExp(te1)} and ${unparseTExp(te2)}`);
+    }
+};
+
+export const makeFreshTExp = (te: TExp): TExp => {
+    const newVars: Map<string, TVar> = new Map();
+
+    const freshRec = (currentTe: TExp): TExp => {
+        const derefedTe = tvarDeref(currentTe);
+
+        if (isTVar(derefedTe)) {
+            if (newVars.has(derefedTe.var)) {
+                return newVars.get(derefedTe.var)!;
+            } else {
+                const freshVar = makeFreshTVar();
+                newVars.set(derefedTe.var, freshVar);
+                return freshVar;
+            }
+        } else if (isProcTExp(derefedTe)) {
+            return makeProcTExp(derefedTe.paramTEs.map(freshRec), freshRec(derefedTe.returnTE));
+        } else if (isPairTExp(derefedTe)) {
+            return makePairTExp(freshRec(derefedTe.left), freshRec(derefedTe.right));
+        } else if (isNonEmptyTupleTExp(derefedTe)) {
+            return makeNonEmptyTupleTExp(derefedTe.TEs.map(t => freshRec(t) as NonTupleTExp));
+        } else {
+            return derefedTe;
+        }
+    };
+    return freshRec(te);
 };

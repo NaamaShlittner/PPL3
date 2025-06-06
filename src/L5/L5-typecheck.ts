@@ -4,7 +4,7 @@ import { equals, map, zipWith } from 'ramda';
 import { isAppExp, isBoolExp, isDefineExp, isIfExp, isLetrecExp, isLetExp, isNumExp,
          isPrimOp, isProcExp, isProgram, isStrExp, isVarRef, parseL5Exp, unparse,
          AppExp, BoolExp, DefineExp, Exp, IfExp, LetrecExp, LetExp, NumExp,
-         Parsed, PrimOp, ProcExp, Program, StrExp } from "./L5-ast";
+         Parsed, PrimOp, ProcExp, Program, StrExp, parseL5 } from "./L5-ast";
 import { applyTEnv, makeEmptyTEnv, makeExtendTEnv, TEnv } from "./TEnv";
 import { isProcTExp, makeBoolTExp, makeNumTExp, makeProcTExp, makeStrTExp, makeVoidTExp,
          parseTE, unparseTExp,
@@ -13,6 +13,7 @@ import { isEmpty, allT, first, rest, NonEmptyList, List, isNonEmptyList } from '
 import { Result, makeFailure, bind, makeOk, zipWithResult } from '../shared/result';
 import { parse as p } from "../shared/parser";
 import { format } from '../shared/format';
+import { log } from 'console';
 
 // Purpose: Check that type expressions are equivalent
 // as part of a fully-annotated type check process of exp.
@@ -222,5 +223,37 @@ export const typeofDefine = (exp: DefineExp, tenv: TEnv): Result<VoidTExp> => {
 // Purpose: compute the type of a program
 // Typing rule:
 // TODO - write the true definition
-export const typeofProgram = (exp: Program, tenv: TEnv): Result<TExp> =>
-    makeFailure("TODO");
+export const typeofProgram = (exp: Program, tenv: TEnv): Result<TExp> =>{
+    const defExps = exp.exps.filter(isDefineExp);
+    console.log(`found ${defExps.length} defines in program`);
+    const lastExp = exp.exps[exp.exps.length - 1];
+    console.log(`last exp in program: ${unparse(lastExp)}`);
+
+    return bind(insertDefinesIntoTEnv(defExps, tenv), (newTEnv: TEnv) => 
+        typeofExp(lastExp, newTEnv));
+}
+
+// Purpose: inserts a TEnv from a sequence of defines
+export const insertDefinesIntoTEnv = (d: DefineExp[], tenv: TEnv): Result<TEnv> => 
+    d.reduce((acc: Result<TEnv>, defineExp: DefineExp) =>
+        bind(acc, (currentTEnv: TEnv) => insertDefineIntoTEnv(defineExp, currentTEnv)),
+        makeOk(tenv));
+
+
+
+// Purpose: Insert a define into a TEnv
+export const insertDefineIntoTEnv = (d: DefineExp, tenv: TEnv): Result<TEnv> => 
+    bind(typeofDefine(d, tenv), (runType: TExp) => 
+        checkEqualType(runType, makeVoidTExp(), d) ? makeOk(makeExtendTEnv([d.var.var], [d.var.texp], tenv)) :
+        makeFailure(`Type error in define: ${unparse(d)} - expected void type of define exp`));
+
+
+export const L5programTypeof = (program: string): Result<string> => {
+    const type = bind(makeOk(program), (x) =>
+        bind(parseL5(x), (e: Program) => 
+            bind(typeofProgram(e, makeEmptyTEnv()), unparseTExp)));
+
+    console.log(`L5programTypeof: ${type}`);
+    return type;
+}
+

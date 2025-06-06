@@ -225,9 +225,7 @@ export const typeofDefine = (exp: DefineExp, tenv: TEnv): Result<VoidTExp> => {
 // TODO - write the true definition
 export const typeofProgram = (exp: Program, tenv: TEnv): Result<TExp> =>{
     const defExps = exp.exps.filter(isDefineExp);
-    console.log(`found ${defExps.length} defines in program`);
     const lastExp = exp.exps[exp.exps.length - 1];
-    console.log(`last exp in program: ${unparse(lastExp)}`);
 
     return bind(insertDefinesIntoTEnv(defExps, tenv), (newTEnv: TEnv) => 
         typeofExp(lastExp, newTEnv));
@@ -248,12 +246,9 @@ export const insertDefineIntoTEnv = (d: DefineExp, tenv: TEnv): Result<TEnv> =>
         makeFailure(`Type error in define: ${unparse(d)} - expected void type of define exp`));
 
 
-export const L5programTypeof = (program: string): Result<string> => {
-    const type = bind(makeOk(program), (x) =>
+export const L5programTypeof = (program: string): Result<string> => 
+     bind(makeOk(program), (x) =>
         bind(parseL5(x), (e: Program) => 
             bind(typeofProgram(e, makeEmptyTEnv()), unparseTExp)));
 
-    console.log(`L5programTypeof: ${type}`);
-    return type;
-}
 

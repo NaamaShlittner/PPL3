@@ -213,8 +213,10 @@ export const typeofLetrec = (exp: LetrecExp, tenv: TEnv): Result<TExp> => {
 //   (define (var : texp) val)
 // TODO - write the true definition
 export const typeofDefine = (exp: DefineExp, tenv: TEnv): Result<VoidTExp> => {
-    // return Error("TODO");
-    return makeOk(makeVoidTExp());
+    const valType = typeofExp(exp.val, tenv)
+    const decleredType = exp.var.texp;
+    const constraint = bind(valType, (valTE: TExp) => checkEqualType(valTE, decleredType, exp));
+    return bind(constraint, _ => makeOk(makeVoidTExp()));
 };
 
 // Purpose: compute the type of a program
